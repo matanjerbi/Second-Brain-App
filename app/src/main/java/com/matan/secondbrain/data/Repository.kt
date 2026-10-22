@@ -135,12 +135,12 @@ class Repository(
             if (text == null) return@withContext ImportResult(0, 0, 0, 0, "לא נמצא קובץ צ'אט בתוך ה-ZIP")
             val trimmed = text.trimStart('﻿', ' ', '\n', '\r')
             val parsed = if (trimmed.startsWith("{")) ChatImporter.parseImportJson(trimmed) else ChatImporter.parseWhatsAppText(trimmed)
-            if (parsed.items.isEmpty()) return@withContext ImportResult(0, 0, 0, parsed.media, "לא נמצאו הודעות בקובץ")
+            if (parsed.items.isEmpty()) return@withContext ImportResult(0, 0, 0, parsed.skippedMedia, "לא נמצאו הודעות בקובץ")
             val ids = dao.insertAll(parsed.items)
             val added = ids.count { it > 0 }
             val vault = parsed.items.zip(ids).count { (item, id) -> id > 0 && item.sensitive }
             if (settings.autoEnrich && client() != null) scope.launch { enrichPending() }
-            ImportResult(added, parsed.items.size - added, vault, parsed.media)
+            ImportResult(added, parsed.items.size - added, vault, parsed.skippedMedia)
         } catch (e: Exception) {
             ImportResult(0, 0, 0, 0, "שגיאה בייבוא: ${e.message}")
         }
