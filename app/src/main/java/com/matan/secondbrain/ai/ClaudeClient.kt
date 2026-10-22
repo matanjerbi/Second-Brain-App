@@ -86,5 +86,42 @@ class ClaudeClient(private val apiKey: String, private val model: String) {
             if (start < 0 || end <= start) throw AiException("תשובה לא צפויה מהמודל")
             return JSONObject(text.substring(start, end + 1))
         }
+
+        /**
+         * Pulls every complete item object out of an {"items":[...]} reply, even when the reply
+         * was cut off part way through, so finished items aren't lost.
+         */
+        fun extractObjects(text: String): List<JSONObject> {
+            val arrStart = text.indexOf('[').takeIf { it >= 0 } ?: return emptyList()
+            val out = ArrayList<JSONObject>()
+            var depth = 0
+            var inString = false
+            var escape = false
+            var objStart = -1
+            for (i in arrStart + 1 until text.length) {
+                val ch = text[i]
+                if (inString) {
+                    when {
+                        escape -> escape = false
+                        ch == '\\' -> escape = true
+                        ch == '"' -> inString = false
+                    }
+                    continue
+                }
+                when (ch) {
+                    '"' -> inString = true
+                    '{' -> { if (depth == 0) objStart = i; depth++ }
+                    '}' -> {
+                        depth--
+                        if (depth == 0 && objStart >= 0) {
+                            runCatching { JSONObject(text.substring(objStart, i + 1)) }.getOrNull()?.let(out::add)
+                            objStart = -1
+                        }
+                    }
+                    ']' -> if (depth == 0) return out
+                }
+            }
+            return out
+        }
     }
 }

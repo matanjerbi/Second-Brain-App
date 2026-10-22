@@ -213,8 +213,9 @@ class Repository(
     }
 
     suspend fun enrichOne(item: Item) {
-        val c = client() ?: return
         if (item.sensitive) return
+        localEnrichment(item)?.let { dao.update(it); return }
+        val c = client() ?: return
         if (item.type == ItemType.IMAGE && item.imagePath != null) {
             val b64 = Ingest.jpegBase64(File(item.imagePath))
             if (b64 != null) {
@@ -230,17 +231,41 @@ class Repository(
         enrichBatch(c, listOf(item))
     }
 
-    private suspend fun enrichBatch(c: ClaudeClient, batch: List<Item>) {
+    /** Returns how many items of the batch were enriched. Splits the batch in half if the reply was cut off. */
+    private suspend fun enrichBatch(c: ClaudeClient, batch: List<Item>): Int {
         val arr = JSONArray()
         batch.forEach { arr.put(itemForPrompt(it)) }
-        val reply = c.completeText(Prompts.ENRICH_SYSTEM, JSONObject().put("items", arr).toString(), 4000)
-        val out = ClaudeClient.extractJson(reply).optJSONArray("items") ?: JSONArray()
+        val reply = c.completeText(Prompts.ENRICH_SYSTEM, JSONObject().put("items", arr).toString(), 8000)
+        val objects = ClaudeClient.extractObjects(reply)
         val byId = batch.associateBy { it.id.toString() }
-        for (k in 0 until out.length()) {
-            val o = out.optJSONObject(k) ?: continue
+        var count = 0
+        val seen = HashSet<Long>()
+        for (o in objects) {
             val orig = byId[o.optString("id")] ?: continue
             dao.update(applyEnrichment(dao.get(orig.id) ?: orig, o))
+            seen.add(orig.id)
+            count++
         }
+        val missing = batch.filter { it.id !in seen }
+        if (missing.isNotEmpty() && missing.size < batch.size) {
+            // Reply was truncated part way: retry only what's left.
+            count += enrichBatch(c, missing)
+        } else if (missing.size == batch.size && batch.size > 1) {
+            val half = batch.size / 2
+            count += enrichBatch(c, batch.take(half)) + enrichBatch(c, batch.drop(half))
+        }
+        return count
+    }
+
+    /** Bare phone numbers need no AI: label them locally and save the cost. */
+    private fun localEnrichment(i: Item): Item? {
+        if (i.type != ItemType.PHONE) return null
+        return i.copy(
+            title = i.title.ifBlank { "מספר טלפון" },
+            keywords = Item.joinList(listOf("טלפון", "מספר", "phone", "איש קשר") + i.keywordList()),
+            tags = Item.joinList(i.tagList() + "אנשים וטלפונים"),
+            enrichedAt = System.currentTimeMillis(),
+        )
     }
 
     /** Enriches every item that hasn't been processed yet, in batches. */
@@ -254,25 +279,38 @@ class Repository(
             val pending = dao.pendingEnrichment()
             _enrich.value = EnrichState(running = true, done = 0, total = pending.size)
             var done = 0
-            val (images, texts) = pending.partition { it.type == ItemType.IMAGE && it.imagePath != null }
-            for (chunk in texts.chunked(20)) {
+            val (images, rest) = pending.partition { it.type == ItemType.IMAGE && it.imagePath != null }
+            val texts = ArrayList<Item>()
+            for (i in rest) {
+                val local = localEnrichment(i)
+                if (local != null) { dao.update(local); done++ } else texts.add(i)
+            }
+            _enrich.value = _enrich.value.copy(done = done)
+            var failures = 0
+            for (chunk in texts.chunked(8)) {
                 runCatching { enrichBatch(c, chunk) }.onFailure { e ->
-                    _enrich.value = _enrich.value.copy(error = e.message)
+                    failures += chunk.size
+                    _enrich.value = _enrich.value.copy(error = shortError(e))
                     if (e.message?.contains("מפתח") == true) return
                 }
                 done += chunk.size
                 _enrich.value = _enrich.value.copy(done = done)
             }
             for (img in images) {
-                runCatching { enrichOne(img) }.onFailure { e -> _enrich.value = _enrich.value.copy(error = e.message) }
+                runCatching { enrichOne(img) }.onFailure { e -> failures++; _enrich.value = _enrich.value.copy(error = shortError(e)) }
                 done += 1
                 _enrich.value = _enrich.value.copy(done = done)
             }
+            if (failures == 0) _enrich.value = _enrich.value.copy(error = null)
+            else _enrich.value = _enrich.value.copy(error = "$failures פריטים לא הועשרו. לחץ שוב על \"העשר עכשיו\" כדי לנסות אותם מחדש.")
         } finally {
             _enrich.value = _enrich.value.copy(running = false)
             enrichMutex.unlock()
         }
     }
+
+    private fun shortError(e: Throwable): String =
+        if (e is com.matan.secondbrain.ai.AiException) e.message.orEmpty() else "תשובה לא תקינה מהמודל, ננסה שוב בפעם הבאה"
 
     // ---------- Search and answers ----------
 
