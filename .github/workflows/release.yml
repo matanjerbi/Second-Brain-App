@@ -24,7 +24,14 @@ jobs:
       - name: Build release APK
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease
+          set -o pipefail
+          ./gradlew --no-daemon assembleRelease 2>&1 | tee build.log
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          errs=$(grep -E "^e: |error:|What went wrong" -A3 build.log | head -80 | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=Build errors::${errs}"
 
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk SecondBrain-v1.0.${{ github.run_number }}.apk
