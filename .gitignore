@@ -1,0 +1,13 @@
+.gradle/
+build/
+/app/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.kotlin/
+# Personal data never belongs in this public repo
+*.json.personal
+import*.json
+vault*.json
